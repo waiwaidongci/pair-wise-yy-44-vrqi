@@ -50,6 +50,26 @@ function lock() {
       </div>
     </div>
 
+    <el-alert
+      v-if="store.confirmationsInvalid"
+      class="invalidate-alert"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="确认已失效"
+      description="场馆尺寸或提示字段已变更，此前确认作废，需重新确认后再出表。"
+    />
+
+    <el-alert
+      v-if="store.tablesInvalid"
+      class="invalidate-alert"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="出表已失效"
+      description="场馆尺寸或提示字段已变更，走位表与执行清单需重新生成。"
+    />
+
     <div class="script-layout">
       <section class="timeline">
         <article v-for="(cue, index) in script" :key="cue.id" class="timeline-item">
@@ -131,6 +151,10 @@ function lock() {
   margin-left: auto;
   color: #5e6d79;
   font-size: 12px;
+}
+
+.invalidate-alert {
+  margin-bottom: 12px;
 }
 
 .script-layout {

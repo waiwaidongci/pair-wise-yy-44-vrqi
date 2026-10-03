@@ -1,5 +1,6 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
+import axios from 'axios'
 
 export type Department = '舞台' | '灯光' | '音响' | '道具'
 export type Point = { x: number; y: number }
@@ -29,12 +30,68 @@ export type Cue = {
   comments: Comment[]
 }
 
+export type Venue = { name: string; width: number; depth: number }
+
+export type StagedChange = {
+  id: string
+  cueId: string
+  field: string
+  oldValue: unknown
+  newValue: unknown
+  at: string
+  acked: boolean
+}
+
+export type FieldVersion = { value: unknown; source: 'local' | 'remote' }
+
+export type FieldConflict = {
+  id: string
+  cueId: string
+  field: string
+  local: FieldVersion
+  remote: FieldVersion
+  resolved: boolean
+  chosen: 'local' | 'remote' | null
+}
+
+export type BaselineSnapshot = {
+  id: string
+  batchNo: number
+  venue: Venue
+  frozenAt: string
+  revision: string
+  cues: Cue[]
+}
+
+export type BatchStatus = 'active' | 'synced' | 'failed'
+export type WriteState = 'idle' | 'writing' | 'failed' | 'done'
+
+export type CityBatch = {
+  batchNo: number
+  fromVenue: Venue | null
+  toVenue: Venue
+  status: BatchStatus
+  startedAt: string
+  cues: Cue[]
+  batchStartCues: Cue[]
+  baseline: BaselineSnapshot | null
+  stagedChanges: StagedChange[]
+  conflicts: FieldConflict[]
+  writeState: WriteState
+  writeError: string | null
+  confirmationsValid: boolean
+  tablesValid: boolean
+  lastSyncedAt: string | null
+}
+
 export const seedProject = {
   name: '潮汐来信',
   venue: '上海大剧院 · 大剧场',
   rehearsalDate: '2026-10-08',
   company: '远岸剧团',
 }
+
+export const seedVenue: Venue = { name: '上海大剧院 · 大剧场', width: 12, depth: 10 }
 
 export const seedMovers = [
   { id: 'M-01', alias: '林默', role: '父亲', group: '主要演员', color: '#d96b45' },
@@ -147,10 +204,176 @@ export const seedCues: Cue[] = [
 
 const STORAGE_KEY = 'stage-scheduler-draft-v1'
 
+const SCALAR_FIELDS = ['act', 'scene', 'time', 'title', 'department', 'owner', 'duration', 'note', 'status'] as const
+const OBJECT_FIELDS = ['entry', 'exit'] as const
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value))
+}
+
+function createInitialBatch(cues: Cue[]): CityBatch {
+  return {
+    batchNo: 1,
+    fromVenue: null,
+    toVenue: { ...seedVenue },
+    status: 'active',
+    startedAt: new Date().toISOString(),
+    cues,
+    batchStartCues: deepClone(cues),
+    baseline: null,
+    stagedChanges: [],
+    conflicts: [],
+    writeState: 'idle',
+    writeError: null,
+    confirmationsValid: true,
+    tablesValid: true,
+    lastSyncedAt: null,
+  }
+}
+
+/**
+ * 三向合并：以批次开始快照为基准，比较本地与远端的字段差异。
+ * - 两边都改的字段 → 冲突，保留两版来源，等待裁决。
+ * - 仅远端改的字段 → 采用远端值。
+ * - 仅本地改的字段 → 保留本地值。
+ * - 留言按 id 并集合并。
+ * 纯函数，不依赖网络，便于离线恢复与测试。
+ */
+export function mergeBatch(
+  batchStartCues: Cue[],
+  localCues: Cue[],
+  remoteCues: Cue[],
+): { cues: Cue[]; conflicts: FieldConflict[] } {
+  const merged = deepClone(localCues)
+  const conflicts: FieldConflict[] = []
+  const startById = new Map(batchStartCues.map((cue) => [cue.id, cue]))
+  const remoteById = new Map(remoteCues.map((cue) => [cue.id, cue]))
+  const mergedById = new Map(merged.map((cue) => [cue.id, cue]))
+
+  const conflictId = () => `FC-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+
+  for (const startCue of batchStartCues) {
+    const remoteCue = remoteById.get(startCue.id)
+    const localCue = mergedById.get(startCue.id)
+    if (!localCue) continue
+
+    for (const field of SCALAR_FIELDS) {
+      const startVal = (startCue as Record<string, unknown>)[field]
+      const remoteVal = remoteCue ? (remoteCue as Record<string, unknown>)[field] : startVal
+      const localVal = (localCue as Record<string, unknown>)[field]
+      const localChanged = !deepEqual(localVal, startVal)
+      const remoteChanged = !deepEqual(remoteVal, startVal)
+      if (localChanged && remoteChanged) {
+        conflicts.push({
+          id: conflictId(),
+          cueId: startCue.id,
+          field,
+          local: { value: localVal, source: 'local' },
+          remote: { value: remoteVal, source: 'remote' },
+          resolved: false,
+          chosen: null,
+        })
+      } else if (remoteChanged && !localChanged) {
+        ;(localCue as Record<string, unknown>)[field] = deepClone(remoteVal)
+      }
+    }
+
+    for (const field of OBJECT_FIELDS) {
+      const startVal = startCue[field]
+      const remoteVal = remoteCue?.[field] ?? startVal
+      const localVal = localCue[field]
+      const localChanged = !deepEqual(localVal, startVal)
+      const remoteChanged = !deepEqual(remoteVal, startVal)
+      if (localChanged && remoteChanged) {
+        conflicts.push({
+          id: conflictId(),
+          cueId: startCue.id,
+          field,
+          local: { value: localVal, source: 'local' },
+          remote: { value: remoteVal, source: 'remote' },
+          resolved: false,
+          chosen: null,
+        })
+      } else if (remoteChanged && !localChanged) {
+        ;(localCue as Record<string, unknown>)[field] = deepClone(remoteVal)
+      }
+    }
+
+    const startRoute = startCue.route
+    const remoteRoute = remoteCue?.route ?? startRoute
+    const localRoute = localCue.route
+    const localRouteChanged = !deepEqual(localRoute, startRoute)
+    const remoteRouteChanged = !deepEqual(remoteRoute, startRoute)
+    if (localRouteChanged && remoteRouteChanged) {
+      conflicts.push({
+        id: conflictId(),
+        cueId: startCue.id,
+        field: 'route',
+        local: { value: localRoute, source: 'local' },
+        remote: { value: remoteRoute, source: 'remote' },
+        resolved: false,
+        chosen: null,
+      })
+    } else if (remoteRouteChanged && !localRouteChanged) {
+      localCue.route = deepClone(remoteRoute)
+    }
+
+    const remoteComments = remoteCue?.comments ?? []
+    const localCommentIds = new Set(localCue.comments.map((comment) => comment.id))
+    for (const remoteComment of remoteComments) {
+      if (!localCommentIds.has(remoteComment.id)) {
+        localCue.comments.push(deepClone(remoteComment))
+      }
+    }
+  }
+
+  for (const localCue of merged) {
+    if (startById.has(localCue.id)) continue
+    const remoteCue = remoteById.get(localCue.id)
+    if (!remoteCue) continue
+    for (const field of SCALAR_FIELDS) {
+      const remoteVal = (remoteCue as Record<string, unknown>)[field]
+      const localVal = (localCue as Record<string, unknown>)[field]
+      if (!deepEqual(localVal, remoteVal)) {
+        conflicts.push({
+          id: conflictId(),
+          cueId: localCue.id,
+          field,
+          local: { value: localVal, source: 'local' },
+          remote: { value: remoteVal, source: 'remote' },
+          resolved: false,
+          chosen: null,
+        })
+      }
+    }
+  }
+
+  for (const remoteCue of remoteCues) {
+    if (!startById.has(remoteCue.id) && !mergedById.has(remoteCue.id)) {
+      merged.push(deepClone(remoteCue))
+    }
+  }
+
+  return { cues: merged, conflicts }
+}
+
 export const useWorkshopStore = defineStore('workshop', () => {
   const saved = localStorage.getItem(STORAGE_KEY)
-  const restored = saved ? (JSON.parse(saved) as { cues?: Cue[]; revision?: number }) : null
-  const cues = ref<Cue[]>(restored?.cues?.length ? restored.cues : structuredClone(seedCues))
+  const restored = saved
+    ? (JSON.parse(saved) as {
+        cues?: Cue[]
+        revision?: number
+        batch?: CityBatch | null
+        baselines?: BaselineSnapshot[]
+      })
+    : null
+
+  const initialCues = restored?.cues?.length ? restored.cues : deepClone(seedCues)
+  const cues = ref<Cue[]>(initialCues)
   const selectedId = ref('C-01')
   const zoom = ref(100)
   const actFilter = ref('全部')
@@ -162,6 +385,16 @@ export const useWorkshopStore = defineStore('workshop', () => {
   const locked = ref(false)
   const undoStack = ref<Cue[][]>([])
   const redoStack = ref<Cue[][]>([])
+
+  const batch = ref<CityBatch | null>(restored?.batch ?? null)
+  const baselines = ref<BaselineSnapshot[]>(restored?.baselines ?? [])
+  const viewingBaseline = ref<BaselineSnapshot | null>(null)
+
+  if (!batch.value) {
+    batch.value = createInitialBatch(cues.value)
+  } else {
+    batch.value.cues = cues.value
+  }
 
   const selectedCue = computed(() => cues.value.find((cue) => cue.id === selectedId.value) ?? cues.value[0])
   const filteredCues = computed(() =>
@@ -177,19 +410,73 @@ export const useWorkshopStore = defineStore('workshop', () => {
     ),
   )
 
+  const activeBatch = computed(() => batch.value)
+  const batchNo = computed(() => batch.value?.batchNo ?? 0)
+  const currentVenue = computed<Venue>(() => batch.value?.toVenue ?? { ...seedVenue })
+  const pendingConflicts = computed(() => batch.value?.conflicts.filter((conflict) => !conflict.resolved) ?? [])
+  const hasPendingConflicts = computed(() => pendingConflicts.value.length > 0)
+  const stagedCount = computed(() => batch.value?.stagedChanges.filter((change) => !change.acked).length ?? 0)
+  const writeFailed = computed(() => batch.value?.writeState === 'failed')
+  const isWriting = computed(() => batch.value?.writeState === 'writing')
+  const writeError = computed(() => batch.value?.writeError ?? null)
+
+  const canPrint = computed(() => {
+    if (!batch.value) return true
+    if (!batch.value.tablesValid) return false
+    if (pendingConflicts.value.length > 0) return false
+    return true
+  })
+
+  const printBlockReason = computed<string | null>(() => {
+    if (!batch.value) return null
+    if (!batch.value.tablesValid) return '出表已失效：场馆或提示变更后需重新生成出表'
+    if (pendingConflicts.value.length > 0) return `有 ${pendingConflicts.value.length} 项字段冲突未裁决，裁决前禁止打印`
+    return null
+  })
+
+  const confirmationsInvalid = computed(() => !!batch.value && !batch.value.confirmationsValid)
+  const tablesInvalid = computed(() => !!batch.value && !batch.value.tablesValid)
+
   watch(
-    [cues, rev, isOffline],
+    [cues, rev, isOffline, batch, baselines],
     () => {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ cues: cues.value, revision: rev.value }))
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          cues: cues.value,
+          revision: rev.value,
+          batch: batch.value,
+          baselines: baselines.value,
+        }),
+      )
       lastSaved.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
     },
     { deep: true },
   )
 
   function snapshot() {
-    undoStack.value.push(structuredClone(cues.value))
+    undoStack.value.push(deepClone(cues.value))
     if (undoStack.value.length > 20) undoStack.value.shift()
     redoStack.value = []
+  }
+
+  function touchBatch() {
+    if (!batch.value) return
+    batch.value.confirmationsValid = false
+    batch.value.tablesValid = false
+  }
+
+  function recordStaged(cueId: string, field: string, oldValue: unknown, newValue: unknown) {
+    if (!isOffline.value || !batch.value) return
+    batch.value.stagedChanges.push({
+      id: `SC-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      cueId,
+      field,
+      oldValue,
+      newValue,
+      at: new Date().toISOString(),
+      acked: false,
+    })
   }
 
   function updateCue(patch: Partial<Cue>, addRevision = true) {
@@ -197,8 +484,15 @@ export const useWorkshopStore = defineStore('workshop', () => {
     snapshot()
     const index = cues.value.findIndex((cue) => cue.id === selectedId.value)
     if (index < 0) return
-    cues.value[index] = { ...cues.value[index], ...patch }
+    const old = cues.value[index]
+    cues.value[index] = { ...old, ...patch }
     if (addRevision) rev.value += 1
+    if (batch.value) {
+      for (const field of Object.keys(patch)) {
+        recordStaged(old.id, field, (old as Record<string, unknown>)[field], (patch as Record<string, unknown>)[field])
+      }
+      touchBatch()
+    }
   }
 
   function addWaypoint(point: { x: number; y: number }) {
@@ -230,21 +524,27 @@ export const useWorkshopStore = defineStore('workshop', () => {
     cues.value.push(cue)
     selectedId.value = cue.id
     rev.value += 1
+    if (batch.value) {
+      recordStaged(cue.id, '*', null, cue)
+      touchBatch()
+    }
   }
 
   function undo() {
     const previous = undoStack.value.pop()
     if (!previous) return
-    redoStack.value.push(structuredClone(cues.value))
+    redoStack.value.push(deepClone(cues.value))
     cues.value = previous
+    if (batch.value) batch.value.cues = cues.value
     rev.value += 1
   }
 
   function redo() {
     const next = redoStack.value.pop()
     if (!next) return
-    undoStack.value.push(structuredClone(cues.value))
+    undoStack.value.push(deepClone(cues.value))
     cues.value = next
+    if (batch.value) batch.value.cues = cues.value
     rev.value += 1
   }
 
@@ -252,14 +552,19 @@ export const useWorkshopStore = defineStore('workshop', () => {
     const cue = selectedCue.value
     if (!cue) return
     snapshot()
-    cue.comments.push({
+    const comment: Comment = {
       id: `local-${Date.now()}`,
       author,
       content,
       createdAt: new Date().toLocaleString('zh-CN'),
       resolved: false,
-    })
+    }
+    cue.comments.push(comment)
     rev.value += 1
+    if (batch.value) {
+      recordStaged(cue.id, 'comments', null, comment)
+      touchBatch()
+    }
   }
 
   function toggleComment(commentId: string) {
@@ -284,6 +589,155 @@ export const useWorkshopStore = defineStore('workshop', () => {
     isOffline.value = !isOffline.value
   }
 
+  function finalizeCity(venue: { name: string; width: number; depth: number }) {
+    if (!batch.value) return
+    const snapshot: BaselineSnapshot = {
+      id: `BL-${batch.value.batchNo}-${Date.now()}`,
+      batchNo: batch.value.batchNo,
+      venue: { ...batch.value.toVenue },
+      frozenAt: new Date().toISOString(),
+      revision: revision.value,
+      cues: deepClone(cues.value),
+    }
+    baselines.value.push(snapshot)
+
+    const newCues = deepClone(cues.value)
+    const newBatch: CityBatch = {
+      batchNo: batch.value.batchNo + 1,
+      fromVenue: { ...batch.value.toVenue },
+      toVenue: { ...venue },
+      status: 'active',
+      startedAt: new Date().toISOString(),
+      cues: newCues,
+      batchStartCues: deepClone(newCues),
+      baseline: snapshot,
+      stagedChanges: [],
+      conflicts: [],
+      writeState: 'idle',
+      writeError: null,
+      confirmationsValid: true,
+      tablesValid: true,
+      lastSyncedAt: null,
+    }
+    cues.value = newCues
+    batch.value = newBatch
+    rev.value += 1
+  }
+
+  function updateVenueSize(width: number, depth: number) {
+    if (!batch.value) return
+    batch.value.toVenue.width = width
+    batch.value.toVenue.depth = depth
+    touchBatch()
+    rev.value += 1
+  }
+
+  function applyMerge(remoteCues: Cue[]) {
+    if (!batch.value) return
+    const { cues: merged, conflicts: newConflicts } = mergeBatch(batch.value.batchStartCues, cues.value, remoteCues)
+    const existingKeys = new Set(batch.value.conflicts.map((conflict) => `${conflict.cueId}:${conflict.field}`))
+    for (const conflict of newConflicts) {
+      if (!existingKeys.has(`${conflict.cueId}:${conflict.field}`)) {
+        batch.value.conflicts.push(conflict)
+      }
+    }
+    batch.value.cues = merged
+    cues.value = merged
+  }
+
+  async function syncBatch(remoteOverride?: Cue[]) {
+    if (!batch.value) return
+    batch.value.writeState = 'writing'
+    batch.value.writeError = null
+    try {
+      let remoteCues = remoteOverride
+      if (!remoteCues) {
+        try {
+          const { data } = await axios.get<Cue[]>('/api/city-batch/remote', {
+            params: { batchNo: batch.value.batchNo },
+          })
+          remoteCues = data
+        } catch (error) {
+          if (axios.isAxiosError(error) && error.response?.status === 404) {
+            const { data: established } = await axios.post<{ remoteCues: Cue[] }>('/api/city-batch/finalize', {
+              batchNo: batch.value.batchNo,
+              fromVenue: batch.value.fromVenue,
+              toVenue: batch.value.toVenue,
+              cues: deepClone(batch.value.batchStartCues),
+            })
+            remoteCues = established.remoteCues
+          } else {
+            throw error
+          }
+        }
+      }
+      applyMerge(remoteCues)
+      await axios.post('/api/city-batch/sync', {
+        batchNo: batch.value.batchNo,
+        cues: deepClone(cues.value),
+      })
+      batch.value.stagedChanges.forEach((change) => {
+        change.acked = true
+      })
+      batch.value.stagedChanges = []
+      batch.value.writeState = 'done'
+      batch.value.status = 'synced'
+      batch.value.lastSyncedAt = new Date().toISOString()
+      rev.value += 1
+    } catch (error) {
+      batch.value.writeState = 'failed'
+      batch.value.writeError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  async function resumeBatch() {
+    if (!batch.value) return
+    const hasUnacked = batch.value.stagedChanges.some((change) => !change.acked)
+    if (!hasUnacked && batch.value.writeState !== 'failed') return
+    await syncBatch()
+  }
+
+  function resolveConflict(cueId: string, field: string, chosen: 'local' | 'remote') {
+    if (!batch.value) return
+    const conflict = batch.value.conflicts.find((item) => item.cueId === cueId && item.field === field)
+    if (!conflict || conflict.resolved) return
+    conflict.chosen = chosen
+    conflict.resolved = true
+    if (chosen === 'remote') {
+      const cue = cues.value.find((item) => item.id === cueId)
+      if (cue) {
+        if (field === 'route') {
+          cue.route = deepClone(conflict.remote.value as Point[])
+        } else if (field === 'entry' || field === 'exit') {
+          ;(cue as Record<string, unknown>)[field] = deepClone(conflict.remote.value)
+        } else {
+          ;(cue as Record<string, unknown>)[field] = deepClone(conflict.remote.value)
+        }
+      }
+    }
+    rev.value += 1
+  }
+
+  function confirmAll() {
+    if (!batch.value) return
+    batch.value.confirmationsValid = true
+    rev.value += 1
+  }
+
+  function generateTables() {
+    if (!batch.value) return
+    batch.value.tablesValid = true
+    rev.value += 1
+  }
+
+  function viewBaseline(snapshot: BaselineSnapshot) {
+    viewingBaseline.value = snapshot
+  }
+
+  function closeBaseline() {
+    viewingBaseline.value = null
+  }
+
   return {
     cues,
     selectedId,
@@ -299,6 +753,22 @@ export const useWorkshopStore = defineStore('workshop', () => {
     locked,
     canUndo: computed(() => undoStack.value.length > 0),
     canRedo: computed(() => redoStack.value.length > 0),
+    batch,
+    baselines,
+    viewingBaseline,
+    activeBatch,
+    batchNo,
+    currentVenue,
+    pendingConflicts,
+    hasPendingConflicts,
+    stagedCount,
+    writeFailed,
+    isWriting,
+    writeError,
+    canPrint,
+    printBlockReason,
+    confirmationsInvalid,
+    tablesInvalid,
     updateCue,
     addWaypoint,
     addCue,
@@ -309,5 +779,14 @@ export const useWorkshopStore = defineStore('workshop', () => {
     lockBaseline,
     unlockBaseline,
     toggleOffline,
+    finalizeCity,
+    updateVenueSize,
+    syncBatch,
+    resumeBatch,
+    resolveConflict,
+    confirmAll,
+    generateTables,
+    viewBaseline,
+    closeBaseline,
   }
 })

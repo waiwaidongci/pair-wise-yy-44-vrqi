@@ -9,10 +9,18 @@ const includeRoutes = ref(true)
 const includeComments = ref(false)
 
 function print() {
+  if (!store.canPrint) {
+    ElMessage.warning(store.printBlockReason ?? '当前无法打印')
+    return
+  }
   window.print()
 }
 
 function exportCsv() {
+  if (!store.canPrint) {
+    ElMessage.warning(store.printBlockReason ?? '当前无法导出')
+    return
+  }
   const rows = [
     ['编号', '时间码', '场景', '提示', '部门', '责任', '路线节点', '状态'],
     ...store.cues.map((cue) => [
@@ -26,7 +34,7 @@ function exportCsv() {
       cue.status,
     ]),
   ]
-  const csv = `\uFEFF${rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')}`
+  const csv = `﻿${rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')}`
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
@@ -47,16 +55,28 @@ function exportCsv() {
       </div>
       <div class="actions">
         <el-button @click="exportCsv">导出 CSV</el-button>
-        <el-button type="primary" @click="print">打印 / 导出 PDF</el-button>
+        <el-button type="primary" :disabled="!store.canPrint" @click="print">打印 / 导出 PDF</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="!store.canPrint"
+      class="print-block-alert no-print"
+      type="error"
+      show-icon
+      :closable="false"
+      :title="store.printBlockReason ?? '当前无法打印'"
+      description="请先回到巡演总览处理未裁决冲突，或在提示/场馆变更后重新出表。"
+    />
 
     <div class="print-options panel no-print">
       <strong>文档内容</strong>
       <el-checkbox v-model="includeNotes">执行说明</el-checkbox>
       <el-checkbox v-model="includeRoutes">路线坐标</el-checkbox>
       <el-checkbox v-model="includeComments">未解决留言</el-checkbox>
-      <span class="print-revision">版本 {{ store.revision }} · 生成于 {{ new Date().toLocaleString('zh-CN') }}</span>
+      <span class="print-revision">
+        批次 {{ store.batchNo }} · 版本 {{ store.revision }} · {{ store.currentVenue.name }} · 生成于 {{ new Date().toLocaleString('zh-CN') }}
+      </span>
     </div>
 
     <article class="print-sheet">
@@ -68,7 +88,9 @@ function exportCsv() {
         <dl>
           <div><dt>排练日</dt><dd>2026-10-08</dd></div>
           <div><dt>版本</dt><dd>{{ store.revision }}</dd></div>
-          <div><dt>场地</dt><dd>上海大剧院 · 大剧场</dd></div>
+          <div><dt>批次</dt><dd>第 {{ store.batchNo }} 城</dd></div>
+          <div><dt>场地</dt><dd>{{ store.currentVenue.name }}</dd></div>
+          <div><dt>台口 / 台深</dt><dd>{{ store.currentVenue.width }} × {{ store.currentVenue.depth }} m</dd></div>
         </dl>
       </header>
 
@@ -112,6 +134,10 @@ function exportCsv() {
 <style scoped>
 .print-page {
   background: #e8ecee;
+}
+
+.print-block-alert {
+  margin-bottom: 12px;
 }
 
 .print-options {

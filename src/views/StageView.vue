@@ -87,6 +87,14 @@ function updateCue(key: keyof Cue, value: unknown) {
       <el-switch v-model="showRouteEditor" active-text="路线编辑" />
       <el-button @click="store.addCue" :disabled="store.locked">新增提示</el-button>
       <el-tag :type="store.locked ? 'success' : 'info'" effect="plain">{{ store.locked ? '基线已锁定' : '草稿编辑中' }}</el-tag>
+      <el-tag
+        v-if="store.stagedCount"
+        type="warning"
+        effect="plain"
+      >{{ store.isOffline ? '离线暂存 ' + store.stagedCount + ' 项' : '已联网' }}</el-tag>
+      <el-tag v-if="store.hasPendingConflicts" type="danger" effect="plain">
+        {{ store.pendingConflicts.length }} 项冲突待裁决
+      </el-tag>
     </div>
 
     <div class="work-grid">
