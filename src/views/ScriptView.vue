@@ -2,8 +2,10 @@
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWorkshopStore } from '../stores/workshop'
+import { useTourStore } from '../stores/tour'
 
 const store = useWorkshopStore()
+const tour = useTourStore()
 const query = ref('')
 const selectedAct = ref('全部')
 const acts = computed(() => ['全部', ...new Set(store.cues.map((cue) => cue.act))])
@@ -36,10 +38,26 @@ function lock() {
       </div>
       <div class="actions">
         <el-button :disabled="store.locked" @click="lock">锁定演出基线</el-button>
-        <el-button v-if="store.locked" type="warning" plain @click="store.unlockBaseline">解锁修订</el-button>
+        <el-button v-if="store.locked" type="warning" plain :disabled="store.tourFrozen" @click="store.unlockBaseline">
+          {{ store.tourFrozen ? '换城冻结中（换城批次页管理）' : '解锁修订' }}
+        </el-button>
         <el-button type="primary" @click="$router.push('/print')">生成执行清单</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="store.tourFrozen && tour.activeBatch"
+      class="freeze-alert"
+      type="info"
+      show-icon
+      :closable="false"
+      title="换城批次进行中：上一城提示已冻结，锁定只改状态不改文字"
+      :description="`当前批次 ${tour.activeBatch.id}（${tour.activeBatch.phase}），走位与灯光音响调整请在换城批次页按字段暂存与合并。`"
+    >
+      <template #default>
+        <el-button size="small" type="primary" @click="$router.push('/tour')">前往换城批次</el-button>
+      </template>
+    </el-alert>
 
     <div class="panel script-toolbar">
       <el-input v-model="query" clearable placeholder="搜索提示、角色或说明" style="max-width: 320px" />
@@ -119,6 +137,10 @@ function lock() {
 </template>
 
 <style scoped>
+.freeze-alert {
+  margin-bottom: 14px;
+}
+
 .script-toolbar {
   display: flex;
   align-items: center;

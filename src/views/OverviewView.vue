@@ -3,8 +3,10 @@ import { computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import axios from 'axios'
 import { useWorkshopStore } from '../stores/workshop'
+import { useTourStore } from '../stores/tour'
 
 const store = useWorkshopStore()
+const tour = useTourStore()
 const { data: project } = useQuery({
   queryKey: ['project'],
   queryFn: async () => (await axios.get('/api/project')).data,
@@ -38,8 +40,8 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
         <p class="muted">{{ project.venue }} · 排练日 {{ project.rehearsalDate }} · {{ project.company }}</p>
       </div>
       <div class="actions">
-        <el-button @click="store.toggleOffline">{{ store.isOffline ? '恢复在线' : '模拟离线' }}</el-button>
-        <el-button type="primary" @click="$router.push('/stage')">进入舞台工作区</el-button>
+        <el-button @click="tour.toggleOffline">{{ tour.isOffline ? '恢复在线' : '模拟离线' }}</el-button>
+        <el-button type="primary" @click="$router.push('/tour')">进入换城批次</el-button>
       </div>
     </div>
 

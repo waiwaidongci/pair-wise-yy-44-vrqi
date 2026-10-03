@@ -160,6 +160,8 @@ export const useWorkshopStore = defineStore('workshop', () => {
   const lastSaved = ref('刚刚自动保存')
   const isOffline = ref(false)
   const locked = ref(false)
+  /** 换城批次定稿后的冻结锁定：只改状态，不能在排练脚本页解锁 */
+  const tourFrozen = ref(false)
   const undoStack = ref<Cue[][]>([])
   const redoStack = ref<Cue[][]>([])
 
@@ -276,6 +278,7 @@ export const useWorkshopStore = defineStore('workshop', () => {
   }
 
   function unlockBaseline() {
+    if (tourFrozen.value) return
     locked.value = false
     rev.value += 1
   }
@@ -297,6 +300,7 @@ export const useWorkshopStore = defineStore('workshop', () => {
     lastSaved,
     isOffline,
     locked,
+    tourFrozen,
     canUndo: computed(() => undoStack.value.length > 0),
     canRedo: computed(() => redoStack.value.length > 0),
     updateCue,

@@ -1,21 +1,40 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWorkshopStore } from '../stores/workshop'
+import { useTourStore } from '../stores/tour'
 
 const store = useWorkshopStore()
+const tour = useTourStore()
 const includeNotes = ref(true)
 const includeRoutes = ref(true)
 const includeComments = ref(false)
 
+const gate = computed(() => tour.printGate)
+const cues = computed(() => tour.printCues)
+const batch = computed(() => tour.activeBatch)
+const venueName = computed(() => {
+  if (batch.value && ['待确认', '已完成'].includes(batch.value.phase)) return batch.value.venue.venueName
+  return tour.latestBaseline?.venueName ?? '上海大剧院 · 大剧场'
+})
+const sheetRevision = computed(() => (batch.value ? `${batch.value.id} · ${tour.currentSignature || store.revision}` : store.revision))
+
 function print() {
+  if (!gate.value.ok) {
+    ElMessage.warning(gate.value.reason)
+    return
+  }
   window.print()
 }
 
 function exportCsv() {
+  if (!gate.value.ok) {
+    ElMessage.warning(gate.value.reason)
+    return
+  }
   const rows = [
     ['编号', '时间码', '场景', '提示', '部门', '责任', '路线节点', '状态'],
-    ...store.cues.map((cue) => [
+    ...cues.value.map((cue) => [
       cue.id,
       cue.time,
       `${cue.act}/${cue.scene}`,
@@ -26,11 +45,11 @@ function exportCsv() {
       cue.status,
     ]),
   ]
-  const csv = `\uFEFF${rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')}`
+  const csv = `﻿${rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')}`
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
-  link.download = `潮汐来信-走位表-${store.revision}.csv`
+  link.download = `潮汐来信-走位表-${sheetRevision.value.replace(/[ ·]/g, '-')}.csv`
   link.click()
   URL.revokeObjectURL(url)
   ElMessage.success('走位表已导出')
@@ -46,29 +65,42 @@ function exportCsv() {
         <p class="muted">打印版仅包含已选信息，固定 A4 横向布局，适合舞台监督工作台使用。</p>
       </div>
       <div class="actions">
-        <el-button @click="exportCsv">导出 CSV</el-button>
-        <el-button type="primary" @click="print">打印 / 导出 PDF</el-button>
+        <el-button :disabled="!gate.ok" @click="exportCsv">导出 CSV</el-button>
+        <el-button type="primary" :disabled="!gate.ok" @click="print">打印 / 导出 PDF</el-button>
       </div>
     </div>
+
+    <el-alert
+      class="no-print gate-alert"
+      :type="gate.ok ? 'success' : 'error'"
+      show-icon
+      :closable="false"
+      :title="gate.ok ? '打印闸门已开启：批次已确认且确认后无变化' : '打印闸门关闭'"
+      :description="gate.reason"
+    >
+      <template v-if="batch && batch.phase !== '已完成'" #default>
+        <el-button size="small" type="primary" @click="$router.push('/tour')">前往换城批次处理</el-button>
+      </template>
+    </el-alert>
 
     <div class="print-options panel no-print">
       <strong>文档内容</strong>
       <el-checkbox v-model="includeNotes">执行说明</el-checkbox>
       <el-checkbox v-model="includeRoutes">路线坐标</el-checkbox>
       <el-checkbox v-model="includeComments">未解决留言</el-checkbox>
-      <span class="print-revision">版本 {{ store.revision }} · 生成于 {{ new Date().toLocaleString('zh-CN') }}</span>
+      <span class="print-revision">批次 {{ sheetRevision }} · 生成于 {{ new Date().toLocaleString('zh-CN') }}</span>
     </div>
 
-    <article class="print-sheet">
+    <article class="print-sheet" :class="{ locked: !gate.ok }">
       <header class="sheet-head">
         <div>
           <span>远岸剧团 · STAGE MANAGEMENT</span>
           <h2>《潮汐来信》执行清单</h2>
         </div>
         <dl>
-          <div><dt>排练日</dt><dd>2026-10-08</dd></div>
-          <div><dt>版本</dt><dd>{{ store.revision }}</dd></div>
-          <div><dt>场地</dt><dd>上海大剧院 · 大剧场</dd></div>
+          <div><dt>换城批次</dt><dd>{{ batch ? batch.id : '首版' }}</dd></div>
+          <div><dt>版本签名</dt><dd>{{ batch ? tour.currentSignature : store.revision }}</dd></div>
+          <div><dt>场地</dt><dd>{{ venueName }}</dd></div>
         </dl>
       </header>
 
@@ -84,7 +116,7 @@ function exportCsv() {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="cue in [...store.cues].sort((a, b) => a.time.localeCompare(b.time))" :key="cue.id">
+          <tr v-for="cue in [...cues].sort((a, b) => a.time.localeCompare(b.time))" :key="cue.id">
             <td class="mono">{{ cue.time }}</td>
             <td>{{ cue.act }} / {{ cue.scene }}</td>
             <td>
@@ -114,6 +146,10 @@ function exportCsv() {
   background: #e8ecee;
 }
 
+.gate-alert {
+  margin-bottom: 14px;
+}
+
 .print-options {
   display: flex;
   align-items: center;
@@ -135,6 +171,27 @@ function exportCsv() {
   padding: 34px;
   background: #fff;
   box-shadow: 0 12px 34px rgb(35 54 65 / 12%);
+}
+
+.print-sheet.locked {
+  position: relative;
+  opacity: 0.72;
+}
+
+.print-sheet.locked::after {
+  content: '未达出表条件 · 禁止打印';
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  padding: 12px 26px;
+  border: 3px solid #c65a4e;
+  border-radius: 10px;
+  color: #c65a4e;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.15em;
+  transform: translateX(-50%) rotate(-12deg);
+  background: rgb(255 255 255 / 72%);
 }
 
 .sheet-head {
@@ -252,6 +309,10 @@ td em {
     max-width: none;
     padding: 0;
     box-shadow: none;
+  }
+
+  .print-sheet.locked {
+    display: none;
   }
 
   th {

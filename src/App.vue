@@ -2,14 +2,17 @@
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useWorkshopStore } from './stores/workshop'
+import { useTourStore } from './stores/tour'
 
 const route = useRoute()
 const store = useWorkshopStore()
+const tour = useTourStore()
 const mobileOpen = ref(false)
 const title = computed(() => String(route.meta.title ?? '巡演舞台'))
 
 const nav = [
   { to: '/', label: '巡演总览', icon: '总' },
+  { to: '/tour', label: '换城批次', icon: '城' },
   { to: '/stage', label: '舞台走位', icon: '图' },
   { to: '/script', label: '排练脚本', icon: '序' },
   { to: '/print', label: '打印中心', icon: '印' },
@@ -52,8 +55,8 @@ const nav = [
           {{ store.isOffline ? '离线草稿已保存' : '协作服务正常' }}
         </div>
         <p>版本 {{ store.revision }} · {{ store.lastSaved }}</p>
-        <button class="ghost-button" @click="store.toggleOffline">
-          {{ store.isOffline ? '恢复连接' : '模拟离线' }}
+        <button class="ghost-button" @click="tour.toggleOffline">
+          {{ tour.isOffline ? '恢复连接' : '模拟离线' }}
         </button>
       </div>
     </aside>
